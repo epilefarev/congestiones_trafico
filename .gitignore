@@ -1,0 +1,90 @@
+# ==== ENTORNOS VIRTUALES ====
+venv/
+.env/
+.venv/
+env/
+ENV/
+pipenv/
+*.virtualenv
+
+# ==== PYTHON CACHE ====
+__pycache__/
+*.py[cod]
+*$py.class
+
+# ==== CONFIGURACIONES Y SECRETOS ====
+*.env
+.env.*
+secrets.json
+credentials.json
+service-account.json
+
+# ==== JUPYTER NOTEBOOKS ====
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# ==== ARCHIVOS TEMPORALES ====
+*.log
+*.tmp
+*.temp
+*.swp
+*.swo
+
+# ==== CONFIGURACIÓN DE VS CODE ====
+.vscode/
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+
+# ==== PAQUETES COMPILADOS ====
+*.so
+*.dll
+*.dylib
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+
+# ==== DISTRIBUCIÓN ====
+*.egg-info/
+*.egg
+
+# ==== COVERAGE Y TESTING ====
+.coverage
+coverage.xml
+htmlcov/
+pytest.cache/
+
+# ==== DATA: ARCHIVOS PESADOS ====
+*.parquet
+*.csv
+*.tsv
+*.json
+data/
+datasets/
+*.zip
+*.gz
+
+# ==== CONFIGURACIONES DE IDE ====
+.idea/
+*.iml
+
+# ==== GCP / CLOUD ====
+*.bq
+*.gcloud
+gcloud-auth.json
+
+# ==== MAC OS ====
+.DS_Store
+
+# ==== WINDOWS ====
+Thumbs.db
+desktop.ini
