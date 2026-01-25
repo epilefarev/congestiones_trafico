@@ -65,7 +65,7 @@ pytest.cache/
 
 # ==== DATA: ARCHIVOS PESADOS ====
 *.parquet
-*.csv
+#*.csv
 *.tsv
 *.json
 data/
