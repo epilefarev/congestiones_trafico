@@ -122,6 +122,8 @@ app = dash.Dash(
     external_stylesheets=[dbc.themes.BOOTSTRAP]
 )
 
+server = app.server
+
 menu_items = [
     dbc.NavItem(dbc.NavLink("Dashboard Principal", href="/")),
     dbc.DropdownMenu(

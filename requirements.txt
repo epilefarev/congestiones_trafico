@@ -9,6 +9,7 @@ dash-bootstrap-components==2.0.4
 Flask==3.1.2
 folium==0.20.0
 geopandas==1.1.2
+gunicorn==24.1.1
 idna==3.11
 importlib_metadata==8.7.1
 itsdangerous==2.2.0
