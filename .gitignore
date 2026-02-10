@@ -88,3 +88,6 @@ gcloud-auth.json
 # ==== WINDOWS ====
 Thumbs.db
 desktop.ini
+
+# Ignorar la carpeta de cache de Flask-Caching
+cache-directory/

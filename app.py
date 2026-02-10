@@ -21,6 +21,15 @@ import io
 
 import json
 
+from flask_caching import Cache
+import os
+
+
+
+
+
+
+
 # Si usas base64 en tu código (no estaba en los callbacks que revisamos, pero lo dejo por si acaso):
 # import base64 
 
@@ -98,6 +107,7 @@ def subagrupar_por_proximidad_fast(df, radio_metros=1000):
                 sub_id_local += 1
                 
     return df
+
 
 df_join = subagrupar_por_proximidad_fast(df_join, radio_metros=1000)
 
@@ -190,6 +200,14 @@ app = dash.Dash(
     external_stylesheets=[dbc.themes.BOOTSTRAP]
 )
 
+# Configuración de Cache en Disco (ideal para Heroku)
+cache = Cache(app.server, config={
+    'CACHE_TYPE': 'filesystem',
+    'CACHE_DIR': 'cache-directory'
+})
+
+TIMEOUT = 3600 # El proceso se guarda por 1 hora
+
 server = app.server
 
 menu_items = [
@@ -221,7 +239,7 @@ navbar = dbc.NavbarSimple(
 
 
 app.layout = dbc.Container([
-    dcc.Store(id='stored-data'),
+    # dcc.Store(id='stored-data'),
     navbar,
     
     # Controles de Selección de Grupo y Simbología en una sola fila
@@ -406,50 +424,50 @@ def generar_mapa_folium(df_data, hora_label):
     return data.getvalue().decode('utf-8')
 
 
+@cache.memoize(timeout=TIMEOUT)
+def obtener_datos_procesados(radio_metros):
+    # Esto solo corre si el radio es NUEVO
+    df = pd.read_csv('congestiones_con_grupos.csv')
+    df = subagrupar_por_proximidad_fast(df, radio_metros=radio_metros)
+    
+    # # Pre-calculamos columnas para evitar KeyErrors
+    # df['hora_extraccion_dt'] = pd.to_datetime(df['hora_extraccion_local'])
+    # df['hora_formateada'] = df['hora_extraccion_dt'].dt.strftime('%H:%M')
+    
+    return df
+
+
 @app.callback(
-    [Output('stored-data', 'data'),
-     Output('grupo-dropdown', 'options'),
+    [Output('grupo-dropdown', 'options'),
      Output('grupo-dropdown', 'value')],
     [Input('radio-dropdown', 'value')]
 )
-def procesar_datos_por_radio(radio_seleccionado):
-    # Leemos el archivo base (siempre el original)
-    df = pd.read_csv('congestiones_con_grupos.csv')
-    
-    # Aplicamos tu función rápida de KDTree
-    df_procesado = subagrupar_por_proximidad_fast(df, radio_metros=radio_seleccionado)
-    
-    # Preparamos las opciones del dropdown
-    conteo = df_procesado.groupby('sub_grupo_id')['id'].count().reset_index(name='count').sort_values('sub_grupo_id')
+def actualizar_dropdowns(radio):
+    df = obtener_datos_procesados(radio) # Instantáneo si ya se calculó
+    conteo = df.groupby('sub_grupo_id')['id'].count().reset_index(name='count').sort_values('sub_grupo_id')
     opciones = [{'label': f"Grupo {r['sub_grupo_id']} ({r['count']} reg)", 'value': r['sub_grupo_id']} for _, r in conteo.iterrows()]
-    
-    # Convertimos el DF a JSON para guardarlo en el navegador del usuario
-    return df_procesado.to_json(date_format='iso', orient='split'), opciones, opciones[0]['value']
+    return opciones, opciones[0]['value'] if opciones else None
 
-
-
-import io
 
 @app.callback(
     [Output('tabla-container', 'children'),
      Output('grafico-evolucion', 'figure')],
     [Input('grupo-dropdown', 'value')],
-    [State('stored-data', 'data')] 
+    [State('radio-dropdown', 'value')] # Usamos el State para saber qué radio pedir al cache
 )
-def actualizar_contenido_grupo(grupo_seleccionado, json_data):
-    # 1. Verificación de seguridad: si no hay datos en el Store, no hacer nada
-    if not json_data or not grupo_seleccionado:
-        return html.Div("Seleccione un radio y un grupo para comenzar."), go.Figure()
+def actualizar_contenido_grupo(grupo_seleccionado, radio):
+    if not grupo_seleccionado:
+        raise dash.exceptions.PreventUpdate
 
-    # 2. RECONSTRUCCIÓN DEL DATAFRAME DESDE EL STORE (Crucial para Heroku)
-    # Usamos StringIO para leer el string JSON
-    df_actual = pd.read_json(io.StringIO(json_data), orient='split')
-        # Convertir hora_extraccion a formato datetime y extraer solo la hora como string para el dropdown
+    # Recuperamos el DataFrame ya agrupado desde el servidor
+    df_actual = obtener_datos_procesados(radio)
+    # Convertir hora_extraccion a formato datetime y extraer solo la hora como string para el dropdown
     df_actual['hora_extraccion_dt'] = pd.to_datetime(df_actual['hora_extraccion_local'])
     # Usaremos un formato HH:MM para el dropdown
     df_actual['hora_formateada'] = df_actual['hora_extraccion_dt'].dt.strftime('%H:%M')
-
     
+    df_filtrado = df_actual[df_actual['sub_grupo_id'] == grupo_seleccionado].copy()
+
     # 3. FILTRADO usando el DataFrame reconstruido
     df_filtrado = df_actual[df_actual['sub_grupo_id'] == grupo_seleccionado].copy()
     
@@ -563,22 +581,23 @@ def actualizar_contenido_grupo(grupo_seleccionado, json_data):
     return tabla_card, fig
 
 
-# SEGUNDO CALLBACK ACTUALIZADO: Usa el Store para los mapas duales
+# SEGUNDO CALLBACK ACTUALIZADO: Ahora usa Cache en lugar de Store
 @app.callback(
     [Output('mapa-iframe-A', 'srcDoc'),
      Output('mapa-iframe-B', 'srcDoc')],
     [Input('grupo-dropdown', 'value'),
      Input('hora-dropdown-A', 'value'),
      Input('hora-dropdown-B', 'value')],
-    [State('stored-data', 'data')] # <--- Acceso a los datos del Store
+    [State('radio-dropdown', 'value')] # <-- Cambiamos State de 'data' a 'value' del radio
 )
-def actualizar_mapas_duales(grupo_seleccionado, hora_A, hora_B, json_data):
+def actualizar_mapas_duales(grupo_seleccionado, hora_A, hora_B, radio_seleccionado):
     # 1. Verificación de seguridad
-    if not json_data or not grupo_seleccionado:
+    if not grupo_seleccionado or not radio_seleccionado:
         return None, None
 
-    # 2. RECONSTRUCCIÓN DEL DATAFRAME (Necesario para estabilidad en Heroku)
-    df_actual = pd.read_json(io.StringIO(json_data), orient='split')
+    # 2. RECUPERAR DATOS DEL CACHE (Instantáneo si ya se calculó)
+    # Esta función ya devuelve el DF con 'hora_formateada' lista
+    df_actual = obtener_datos_procesados(radio_seleccionado)
 
     # Convertir hora_extraccion a formato datetime y extraer solo la hora como string para el dropdown
     df_actual['hora_extraccion_dt'] = pd.to_datetime(df_actual['hora_extraccion_local'])
