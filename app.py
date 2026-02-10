@@ -1,6 +1,10 @@
 import dash
 from dash import dcc, html, callback, Input, Output, State
 import dash_bootstrap_components as dbc
+import pandas as pd
+import numpy as np
+import ast
+from scipy.spatial import cKDTree
 
 import pandas as pd
 import numpy as np
@@ -34,13 +38,74 @@ df_join['hora_extraccion_dt'] = pd.to_datetime(df_join['hora_extraccion_local'])
 # Usaremos un formato HH:MM para el dropdown
 df_join['hora_formateada'] = df_join['hora_extraccion_dt'].dt.strftime('%H:%M')
 
+def subagrupar_por_proximidad_fast(df, radio_metros=1000):
+    # 1. Extraer coordenadas (lon, lat) convirtiendo el string a array de floats
+    def extraer_coord(s):
+        try:
+            # Extrae solo el primer par de la lista de tuplas
+            coords = ast.literal_eval(s)
+            return coords[0] # Retorna (lon, lat)
+        except:
+            return [np.nan, np.nan]
+
+    # Creamos columnas auxiliares de coordenadas
+    coords_ref = np.array(df['first_two_coords'].apply(extraer_coord).tolist())
+    
+    # 2. Conversión aproximada de metros a grados (para el KDTree)
+    # 1 grado de latitud ~ 111,111 metros
+    radio_grados = radio_metros / 111111.0
+    
+    df['sub_grupo_id'] = None
+    
+    # 3. Procesar por cada grupo de Waze
+    for grupo_id in df['congestion_group_id'].unique():
+        mask = df['congestion_group_id'] == grupo_id
+        puntos_grupo = coords_ref[mask]
+        indices_originales = df.index[mask].values
+        
+        if len(puntos_grupo) == 0:
+            continue
+            
+        # Construir el árbol espacial para este grupo
+        tree = cKDTree(puntos_grupo)
+        
+        # Encontrar todos los vecinos dentro del radio para todos los puntos a la vez
+        # Esto devuelve una lista de listas con los índices
+        vecinos_idx = tree.query_ball_tree(tree, radio_grados)
+        
+        # Lógica de asignación de etiquetas (Cluster simple por conectividad)
+        sub_id_local = 1
+        visitados = np.zeros(len(puntos_grupo), dtype=bool)
+        
+        for i in range(len(puntos_grupo)):
+            if not visitados[i]:
+                # Iniciar un nuevo subgrupo (BFS simple)
+                stack = [i]
+                visitados[i] = True
+                
+                while stack:
+                    curr = stack.pop()
+                    df.at[indices_originales[curr], 'sub_grupo_id'] = f"{grupo_id}.{sub_id_local}"
+                    
+                    for v in vecinos_idx[curr]:
+                        if not visitados[v]:
+                            visitados[v] = True
+                            stack.append(v)
+                
+                sub_id_local += 1
+                
+    return df
+
+df_join = subagrupar_por_proximidad_fast(df_join, radio_metros=1000)
+
 # Preparar opciones del primer dropdown (grupos)
-conteo_por_grupo = df_join.groupby('congestion_group_id')['id'].count().reset_index(name='count')
+conteo_por_grupo = df_join.groupby('sub_grupo_id')['id'].count().reset_index(name='count')
 opciones_dropdown_grupo = []
 for index, row in conteo_por_grupo.iterrows():
-    label_texto = f"Grupo {row['congestion_group_id']} ({row['count']} registros)"
-    valor_grupo = row['congestion_group_id']
+    label_texto = f"Grupo {row['sub_grupo_id']} ({row['count']} registros)"
+    valor_grupo = row['sub_grupo_id']
     opciones_dropdown_grupo.append({'label': label_texto, 'value': valor_grupo})
+
 
 # Preparar opciones del segundo dropdown (horas únicas disponibles en todo el dataset)
 horas_unicas = sorted(df_join['hora_formateada'].unique())
@@ -157,16 +222,35 @@ app.layout = dbc.Container([
     
     # Controles de Selección de Grupo y Simbología en una sola fila
     dbc.Row([
+
+        # En tu layout
         dbc.Col([
-            html.Label("Seleccionar Grupo de Estudio:", className="fw-bold mb-1"),
+            html.Label("Seleccionar radio de proximidad (metros):", className="fw-bold mb-1"),
             dcc.Dropdown(
-                id='grupo-dropdown',
-                options=opciones_dropdown_grupo, 
-                value=opciones_dropdown_grupo[0]['value'], 
+                id='radio-dropdown',
+                options=[
+                    {'label': f'{i} metros', 'value': i} for i in [1000, 500, 200, 100, 50, 20, 10]
+                ],
+                value=1000, # Valor inicial sugerido
                 clearable=False,
-                className="dbc" # Aplica estilo Bootstrap al dropdown
+                className="dbc"
             )
         ], md=5),
+
+        dbc.Col([
+            html.Label("Seleccionar Grupo de Estudio:", className="fw-bold mb-1"),
+            dcc.Loading(
+                type="circle",
+                children=dcc.Dropdown(
+                    id='grupo-dropdown',
+                    options=[], # Se llena dinámicamente
+                    clearable=False,
+                    className="dbc"
+                )
+            )
+        ], md=5),
+
+        
 
         # Mueve la simbología a la derecha de los controles principales
         dbc.Col([
@@ -318,12 +402,41 @@ def generar_mapa_folium(df_data, hora_label):
     return data.getvalue().decode('utf-8')
 
 @app.callback(
+    [Output('grupo-dropdown', 'options'),
+     Output('grupo-dropdown', 'value')],
+    [Input('radio-dropdown', 'value')]
+)
+def actualizar_agrupamiento_y_filtros(radio_seleccionado):
+    global df_join # Usamos el df cargado globalmente
+    
+    # 1. Ejecutar tu función rápida de KDTree con el nuevo radio
+    df_join = subagrupar_por_proximidad_fast(df_join, radio_metros=radio_seleccionado)
+    
+    # 2. Preparar las nuevas opciones para el dropdown de grupos
+    conteo_por_subgrupo = df_join.groupby('sub_grupo_id')['id'].count().reset_index(name='count')
+    
+    # Ordenar para que los grupos aparezcan con lógica (1.1, 1.2, etc.)
+    conteo_por_subgrupo = conteo_por_subgrupo.sort_values('sub_grupo_id')
+    
+    nuevas_opciones = [
+        {'label': f"Grupo {row['sub_grupo_id']} ({row['count']} registros)", 
+         'value': row['sub_grupo_id']}
+        for _, row in conteo_por_subgrupo.iterrows()
+    ]
+    
+    # 3. Retornar las opciones y seleccionar el primer grupo por defecto
+    valor_inicial = nuevas_opciones[0]['value'] if nuevas_opciones else None
+    
+    return nuevas_opciones, valor_inicial
+
+
+@app.callback(
     Output('tabla-container', 'children'),
     Output('grafico-evolucion', 'figure'),
     Input('grupo-dropdown', 'value')
 )
 def actualizar_contenido_grupo(grupo_seleccionado):
-    df_filtrado = df_join[df_join['congestion_group_id'] == grupo_seleccionado].copy()
+    df_filtrado = df_join[df_join['sub_grupo_id'] == grupo_seleccionado].copy()
     
     # --- LIMPIEZA Y ORDENAMIENTO ---
     df_filtrado['level'] = df_filtrado['level'].fillna(0).astype(int)
@@ -393,7 +506,7 @@ def actualizar_contenido_grupo(grupo_seleccionado):
     ))
 
     fig.update_layout(
-        title=f"Evolución de Congestión - Grupo {grupo_seleccionado}",
+        title=f"Evolución de Congestión - Sub-Grupo {grupo_seleccionado}",
         xaxis_title="Tiempo", yaxis_title="Longitud (m)",
         template="ggplot2", # Cambiado a oscuro para resaltar el efecto calle
         showlegend=False,
@@ -401,7 +514,7 @@ def actualizar_contenido_grupo(grupo_seleccionado):
     )
 
     # --- 2. Preparar datos para la tabla (código final con formato de floats) ---
-    df_display = df_join[df_join['congestion_group_id'] == grupo_seleccionado].copy()
+    df_display = df_join[df_join['sub_grupo_id'] == grupo_seleccionado].copy()
 
     # Manejo de strings seguro (ya lo tenías):
     df_display['street'] = df_display['street'].fillna('Sin Calle').apply(lambda x: str(x)[:30] + '...' if len(str(x)) > 30 else str(x))
@@ -449,13 +562,13 @@ def actualizar_contenido_grupo(grupo_seleccionado):
 def actualizar_mapas_duales(grupo_seleccionado, hora_A, hora_B):
     # Filtrar datos para la Hora A
     df_A = df_join[
-        (df_join['congestion_group_id'] == grupo_seleccionado) &
+        (df_join['sub_grupo_id'] == grupo_seleccionado) &
         (df_join['hora_formateada'] == hora_A)
     ].copy()
     
     # Filtrar datos para la Hora B
     df_B = df_join[
-        (df_join['congestion_group_id'] == grupo_seleccionado) &
+        (df_join['sub_grupo_id'] == grupo_seleccionado) &
         (df_join['hora_formateada'] == hora_B)
     ].copy()
 
