@@ -17,6 +17,9 @@ import plotly.graph_objects as go
 
 import folium
 from folium.plugins import AntPath
+import io
+
+import json
 
 # Si usas base64 en tu código (no estaba en los callbacks que revisamos, pero lo dejo por si acaso):
 # import base64 
@@ -218,6 +221,7 @@ navbar = dbc.NavbarSimple(
 
 
 app.layout = dbc.Container([
+    dcc.Store(id='stored-data'),
     navbar,
     
     # Controles de Selección de Grupo y Simbología en una sola fila
@@ -401,51 +405,58 @@ def generar_mapa_folium(df_data, hora_label):
     m.save(data, close_file=False)
     return data.getvalue().decode('utf-8')
 
+
 @app.callback(
-    [Output('grupo-dropdown', 'options'),
+    [Output('stored-data', 'data'),
+     Output('grupo-dropdown', 'options'),
      Output('grupo-dropdown', 'value')],
     [Input('radio-dropdown', 'value')]
 )
-def actualizar_agrupamiento_y_filtros(radio_seleccionado):
-    global df_join # Usamos el df cargado globalmente
+def procesar_datos_por_radio(radio_seleccionado):
+    # Leemos el archivo base (siempre el original)
+    df = pd.read_csv('congestiones_con_grupos.csv')
     
-    # 1. Ejecutar tu función rápida de KDTree con el nuevo radio
-    df_join = subagrupar_por_proximidad_fast(df_join, radio_metros=radio_seleccionado)
+    # Aplicamos tu función rápida de KDTree
+    df_procesado = subagrupar_por_proximidad_fast(df, radio_metros=radio_seleccionado)
     
-    # 2. Preparar las nuevas opciones para el dropdown de grupos
-    conteo_por_subgrupo = df_join.groupby('sub_grupo_id')['id'].count().reset_index(name='count')
+    # Preparamos las opciones del dropdown
+    conteo = df_procesado.groupby('sub_grupo_id')['id'].count().reset_index(name='count').sort_values('sub_grupo_id')
+    opciones = [{'label': f"Grupo {r['sub_grupo_id']} ({r['count']} reg)", 'value': r['sub_grupo_id']} for _, r in conteo.iterrows()]
     
-    # Ordenar para que los grupos aparezcan con lógica (1.1, 1.2, etc.)
-    conteo_por_subgrupo = conteo_por_subgrupo.sort_values('sub_grupo_id')
-    
-    nuevas_opciones = [
-        {'label': f"Grupo {row['sub_grupo_id']} ({row['count']} registros)", 
-         'value': row['sub_grupo_id']}
-        for _, row in conteo_por_subgrupo.iterrows()
-    ]
-    
-    # 3. Retornar las opciones y seleccionar el primer grupo por defecto
-    valor_inicial = nuevas_opciones[0]['value'] if nuevas_opciones else None
-    
-    return nuevas_opciones, valor_inicial
+    # Convertimos el DF a JSON para guardarlo en el navegador del usuario
+    return df_procesado.to_json(date_format='iso', orient='split'), opciones, opciones[0]['value']
 
+
+
+import io
 
 @app.callback(
-    Output('tabla-container', 'children'),
-    Output('grafico-evolucion', 'figure'),
-    Input('grupo-dropdown', 'value')
+    [Output('tabla-container', 'children'),
+     Output('grafico-evolucion', 'figure')],
+    [Input('grupo-dropdown', 'value')],
+    [State('stored-data', 'data')] 
 )
-def actualizar_contenido_grupo(grupo_seleccionado):
-    df_filtrado = df_join[df_join['sub_grupo_id'] == grupo_seleccionado].copy()
+def actualizar_contenido_grupo(grupo_seleccionado, json_data):
+    # 1. Verificación de seguridad: si no hay datos en el Store, no hacer nada
+    if not json_data or not grupo_seleccionado:
+        return html.Div("Seleccione un radio y un grupo para comenzar."), go.Figure()
+
+    # 2. RECONSTRUCCIÓN DEL DATAFRAME DESDE EL STORE (Crucial para Heroku)
+    # Usamos StringIO para leer el string JSON
+    df_actual = pd.read_json(io.StringIO(json_data), orient='split')
+    
+    # 3. FILTRADO usando el DataFrame reconstruido
+    df_filtrado = df_actual[df_actual['sub_grupo_id'] == grupo_seleccionado].copy()
     
     # --- LIMPIEZA Y ORDENAMIENTO ---
     df_filtrado['level'] = df_filtrado['level'].fillna(0).astype(int)
     df_filtrado['street'] = df_filtrado['street'].fillna('Sin Calle').astype(str)
+    # Aseguramos que la columna sea datetime para los cálculos
     df_filtrado['hora_extraccion_dt'] = pd.to_datetime(df_filtrado['hora_extraccion_local'])
     df_filtrado = df_filtrado.sort_values(by='hora_extraccion_dt')
     
     if df_filtrado.empty:
-        return html.Div("No hay datos para mostrar"), go.Figure()
+        return html.Div("No hay datos para mostrar en este sub-grupo."), go.Figure()
 
     fig = go.Figure()
 
@@ -465,28 +476,28 @@ def actualizar_contenido_grupo(grupo_seleccionado):
         x_coords = [punto_actual['hora_extraccion_dt'], punto_siguiente['hora_extraccion_dt']]
         y_coords = [punto_actual['length'], punto_siguiente['length']]
         
-        # 1. CAPA INFERIOR: Borde de la calle (Casing negro)
+        # 1. CAPA INFERIOR: Borde de la calle
         fig.add_trace(go.Scatter(
             x=x_coords, y=y_coords, mode='lines',
-            line=dict(color='#2c3e50', width=10), # Más ancha y oscura
+            line=dict(color='#2c3e50', width=10),
             hoverinfo='skip', showlegend=False
         ))
         
         # 2. CAPA MEDIA: Color de congestión
         fig.add_trace(go.Scatter(
             x=x_coords, y=y_coords, mode='lines',
-            line=dict(color=color_segmento, width=16), # Color principal
+            line=dict(color=color_segmento, width=16),
             hoverinfo='skip', showlegend=False
         ))
 
-        # 3. CAPA SUPERIOR: Línea central de carriles (Discontinua)
+        # 3. CAPA SUPERIOR: Línea central
         fig.add_trace(go.Scatter(
             x=x_coords, y=y_coords, mode='lines',
-            line=dict(color='white', width=4, dash='dot'), # Línea punteada blanca
+            line=dict(color='white', width=4, dash='dot'),
             hoverinfo='skip', showlegend=False
         ))
         
-        # --- LÓGICA DEL AUTO (SOLO INICIO) ---
+        # --- LÓGICA DEL AUTO ---
         es_inicio = (i == 0) or (punto_actual['hora_extraccion_dt'] - df_filtrado.iloc[i-1]['hora_extraccion_dt'] > pd.Timedelta(minutes=max_diff_temporal))
         if es_inicio:
             fig.add_trace(go.Scatter(
@@ -495,7 +506,7 @@ def actualizar_contenido_grupo(grupo_seleccionado):
                 textfont=dict(size=24), hoverinfo='skip', showlegend=False
             ))
 
-    # 4. CAPA DE MARCADORES (Puntos con Hover)
+    # 4. CAPA DE MARCADORES
     all_hover = df_filtrado.apply(lambda row: f"Calle: {row['street']}<br>Nivel: {row['level']}<br>Velocidad: {row['speedKMH']:.1f} km/h<br>Hora: {row['hora_extraccion_local']}", axis=1)
     
     fig.add_trace(go.Scatter(
@@ -508,32 +519,28 @@ def actualizar_contenido_grupo(grupo_seleccionado):
     fig.update_layout(
         title=f"Evolución de Congestión - Sub-Grupo {grupo_seleccionado}",
         xaxis_title="Tiempo", yaxis_title="Longitud (m)",
-        template="ggplot2", # Cambiado a oscuro para resaltar el efecto calle
+        template="ggplot2",
         showlegend=False,
         hovermode='closest'
     )
 
-    # --- 2. Preparar datos para la tabla (código final con formato de floats) ---
-    df_display = df_join[df_join['sub_grupo_id'] == grupo_seleccionado].copy()
+    # --- 5. Preparar datos para la tabla (Usando df_filtrado que ya viene del Store) ---
+    df_display = df_filtrado.copy()
 
-    # Manejo de strings seguro (ya lo tenías):
     df_display['street'] = df_display['street'].fillna('Sin Calle').apply(lambda x: str(x)[:30] + '...' if len(str(x)) > 30 else str(x))
     df_display['city'] = df_display['city'].fillna('Sin Ciudad').apply(lambda x: str(x)[:20] + '...' if len(str(x)) > 20 else x)
 
-    # >>>>> FORMATO DE NÚMEROS FLOTANTES A 2 DECIMALES:
-    # Identificamos las columnas que probablemente sean floats y las formateamos como strings
+    # Formateo de números
     df_display['speed'] = df_display['speed'].round(2).astype(str)
     df_display['speedKMH'] = df_display['speedKMH'].round(2).astype(str)
     df_display['length'] = df_display['length'].round(2).astype(str)
-    # Si 'first_two_coords' tiene floats, también podrías necesitar formatearlos si es necesario.
 
-    # Definición de las columnas finales de la tabla:
     columnas_tabla = ['country', 'level', 'city', 'id', 'speed',
                       'speedKMH', 'street', 'length', 'first_two_coords', 
                       'dia_extraccion', 'hora_extraccion_local']
 
     tabla = dbc.Table.from_dataframe(
-        df_display[columnas_tabla].sort_values(by='hora_extraccion_local'),
+        df_display[columnas_tabla],
         striped=True,
         bordered=True,
         hover=True,
@@ -551,28 +558,37 @@ def actualizar_contenido_grupo(grupo_seleccionado):
     return tabla_card, fig
 
 
-# SEGUNDO CALLBACK (NUEVO): Actualiza los mapas duales
+# SEGUNDO CALLBACK ACTUALIZADO: Usa el Store para los mapas duales
 @app.callback(
-    Output('mapa-iframe-A', 'srcDoc'),
-    Output('mapa-iframe-B', 'srcDoc'),
-    Input('grupo-dropdown', 'value'),
-    Input('hora-dropdown-A', 'value'),
-    Input('hora-dropdown-B', 'value')
+    [Output('mapa-iframe-A', 'srcDoc'),
+     Output('mapa-iframe-B', 'srcDoc')],
+    [Input('grupo-dropdown', 'value'),
+     Input('hora-dropdown-A', 'value'),
+     Input('hora-dropdown-B', 'value')],
+    [State('stored-data', 'data')] # <--- Acceso a los datos del Store
 )
-def actualizar_mapas_duales(grupo_seleccionado, hora_A, hora_B):
-    # Filtrar datos para la Hora A
-    df_A = df_join[
-        (df_join['sub_grupo_id'] == grupo_seleccionado) &
-        (df_join['hora_formateada'] == hora_A)
+def actualizar_mapas_duales(grupo_seleccionado, hora_A, hora_B, json_data):
+    # 1. Verificación de seguridad
+    if not json_data or not grupo_seleccionado:
+        return None, None
+
+    # 2. RECONSTRUCCIÓN DEL DATAFRAME (Necesario para estabilidad en Heroku)
+    df_actual = pd.read_json(io.StringIO(json_data), orient='split')
+
+    # 3. Filtrar datos para la Hora A
+    df_A = df_actual[
+        (df_actual['sub_grupo_id'] == grupo_seleccionado) &
+        (df_actual['hora_formateada'] == hora_A)
     ].copy()
     
-    # Filtrar datos para la Hora B
-    df_B = df_join[
-        (df_join['sub_grupo_id'] == grupo_seleccionado) &
-        (df_join['hora_formateada'] == hora_B)
+    # 4. Filtrar datos para la Hora B
+    df_B = df_actual[
+        (df_actual['sub_grupo_id'] == grupo_seleccionado) &
+        (df_actual['hora_formateada'] == hora_B)
     ].copy()
 
-    # Generar ambos mapas usando la función auxiliar
+    # 5. Generar ambos mapas usando la función auxiliar (Folium)
+    # Nota: Asegúrate de que generar_mapa_folium maneje DF vacíos para no romper la app
     mapa_html_A = generar_mapa_folium(df_A, hora_A)
     mapa_html_B = generar_mapa_folium(df_B, hora_B)
     
