@@ -444,6 +444,11 @@ def actualizar_contenido_grupo(grupo_seleccionado, json_data):
     # 2. RECONSTRUCCIÓN DEL DATAFRAME DESDE EL STORE (Crucial para Heroku)
     # Usamos StringIO para leer el string JSON
     df_actual = pd.read_json(io.StringIO(json_data), orient='split')
+        # Convertir hora_extraccion a formato datetime y extraer solo la hora como string para el dropdown
+    df_actual['hora_extraccion_dt'] = pd.to_datetime(df_actual['hora_extraccion_local'])
+    # Usaremos un formato HH:MM para el dropdown
+    df_actual['hora_formateada'] = df_actual['hora_extraccion_dt'].dt.strftime('%H:%M')
+
     
     # 3. FILTRADO usando el DataFrame reconstruido
     df_filtrado = df_actual[df_actual['sub_grupo_id'] == grupo_seleccionado].copy()
@@ -574,6 +579,11 @@ def actualizar_mapas_duales(grupo_seleccionado, hora_A, hora_B, json_data):
 
     # 2. RECONSTRUCCIÓN DEL DATAFRAME (Necesario para estabilidad en Heroku)
     df_actual = pd.read_json(io.StringIO(json_data), orient='split')
+
+    # Convertir hora_extraccion a formato datetime y extraer solo la hora como string para el dropdown
+    df_actual['hora_extraccion_dt'] = pd.to_datetime(df_actual['hora_extraccion_local'])
+    # Usaremos un formato HH:MM para el dropdown
+    df_actual['hora_formateada'] = df_actual['hora_extraccion_dt'].dt.strftime('%H:%M')
 
     # 3. Filtrar datos para la Hora A
     df_A = df_actual[
